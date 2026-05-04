@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# 予約データは個人情報を含むため除外
+*.csv
+
+# 手引き等PDFは除外
+*.pdf
+
+# Streamlit secrets
+.streamlit/secrets.toml
