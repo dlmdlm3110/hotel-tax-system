@@ -122,6 +122,106 @@ def compute_daily_agg(items, meal_per_person=0, tax_inclusive=False):
     return daily
 
 
+def parse_for_verification(file_bytes, target_year, target_month,
+                            meal_per_person=0, tax_inclusive=False):
+    """検証用: 予約別の計算明細とCSV小計を返す。
+    Returns:
+        detail_rows : list[dict]  ─ 予約1件ごとの計算ステップ
+        csv_subtotals: {day: {guests, amount}}  ─ CSV 小計行から取得
+    """
+    for enc in ['utf-8-sig', 'shift_jis', 'cp932']:
+        try:
+            content = file_bytes.decode(enc)
+            break
+        except Exception:
+            continue
+    else:
+        return [], {}
+
+    detail_rows = []
+    csv_subtotals = {}
+
+    for line in content.splitlines()[1:]:
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) < 10:
+            continue
+
+        res_no = parts[0]
+
+        # CSV 小計行 (YYYY/MM/DD) を取得
+        m_date = re.match(r'(\d{4})/(\d{2})/(\d{2})', res_no)
+        if m_date:
+            y, mo, d = int(m_date.group(1)), int(m_date.group(2)), int(m_date.group(3))
+            if y == target_year and mo == target_month:
+                try:
+                    csv_subtotals[d] = {
+                        'guests': int(parts[6]),
+                        'amount': int(parts[9].replace(',', '')),
+                    }
+                except (ValueError, IndexError):
+                    pass
+            continue
+
+        if not res_no or res_no == '予約番号':
+            continue
+
+        # 泊数
+        m_n = re.match(r'(\d+)/(\d+)', parts[1])
+        if not m_n:
+            continue
+        night_num = int(m_n.group(1))
+
+        # 利用期間
+        pm = re.match(r'(\d{1,2})/(\d{1,2})', parts[5])
+        if not pm:
+            continue
+        ci_month, ci_day = int(pm.group(1)), int(pm.group(2))
+        ci_year = target_year - 1 if ci_month > target_month else target_year
+
+        try:
+            checkin = date(ci_year, ci_month, ci_day)
+            night_date = checkin + timedelta(days=night_num - 1)
+        except ValueError:
+            continue
+
+        if night_date.year != target_year or night_date.month != target_month:
+            continue
+
+        try:
+            guests = int(parts[6])
+            amt_str = parts[9].replace(',', '')
+            amount = int(amt_str) if amt_str.lstrip('-').isdigit() else 0
+        except (ValueError, IndexError):
+            continue
+
+        if guests <= 0:
+            continue
+
+        # 計算ステップ
+        adj_amount = (amount / 1.10) if tax_inclusive else amount
+        net = adj_amount - meal_per_person * guests
+        per_person_raw = net / guests
+        base_per = math.floor(per_person_raw / 1000) * 1000
+        tax_pp = min(base_per * TAX_RATE, MAX_TAX_PER_PERSON)
+        tax_total = int(tax_pp * guests)
+
+        detail_rows.append({
+            '宿泊日': f'{target_month}/{night_date.day}',
+            '予約番号': res_no,
+            '利用期間': parts[5],
+            '泊数': parts[1],
+            '氏名': parts[4],
+            '人数': guests,
+            '基本利用（円）': amount,
+            '1人当たり料金': int(per_person_raw),
+            '課税標準額/人（千円切捨）': int(base_per),
+            '課税標準額合計': int(base_per * guests),
+            '宿泊税（円）': tax_total,
+        })
+
+    return detail_rows, csv_subtotals
+
+
 def thin_border():
     s = Side(style='thin')
     return Border(left=s, right=s, top=s, bottom=s)
@@ -692,6 +792,7 @@ with tab_upload:
         raw = uploaded.read()
         items = parse_daily_csv(raw, int(target_year), int(target_month))
         st.session_state['items'] = items
+        st.session_state['raw_csv'] = raw  # 検証用に保持
 
         if items:
             st.success(f'✅ {len(items)} 件の宿泊レコード（予約×泊）を読み込みました')
@@ -794,6 +895,117 @@ with tab_calc:
              '宿泊料金総額（A）': '—', '税率（B）': '—', '税額（A×B）': '—'},
         ])
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        # ── 検証セクション ──
+        st.divider()
+        st.markdown(_sec('🔍', '計算検証', 'CSV小計との照合 ＆ 予約別の計算ステップを確認', '#8E44AD'), unsafe_allow_html=True)
+
+        with st.expander('検証データを開く（クリックで展開）', expanded=False):
+            if 'raw_csv' not in st.session_state:
+                st.info('「データ読み込み」タブでCSVを再アップロードすると検証データが表示されます。')
+            else:
+                v_detail, v_sub = parse_for_verification(
+                    st.session_state['raw_csv'],
+                    int(target_year), int(target_month),
+                    meal_per_person=int(meal_per_person),
+                    tax_inclusive=tax_inclusive,
+                )
+
+                # ── 日別 照合テーブル ──
+                st.subheader('① 日別集計の照合（当システム vs CSV小計）')
+                st.caption('人数が一致していれば、宿泊日の計算（月またぎ含む）が正しいことを意味します。')
+                comp_rows = []
+                all_days = sorted(set(list(daily_data.keys()) + list(v_sub.keys())))
+                for d in all_days:
+                    our_g = daily_data.get(d, {}).get('guests', 0)
+                    our_b = daily_data.get(d, {}).get('base', 0)
+                    our_t = daily_data.get(d, {}).get('tax', 0)
+                    csv_g = v_sub.get(d, {}).get('guests', '―')
+                    match = '✅ 一致' if our_g == csv_g else f'❌ 不一致（CSV:{csv_g}）'
+                    comp_rows.append({
+                        '日付': f'{target_month}/{d}',
+                        '当システム 人数': our_g,
+                        'CSV 小計 人数': csv_g,
+                        '照合': match,
+                        '課税標準額合計（円）': f'{our_b:,}',
+                        '宿泊税（円）': f'{our_t:,}',
+                    })
+                st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+                # 照合サマリー
+                mismatches = [r for r in comp_rows if '❌' in r['照合']]
+                if mismatches:
+                    st.error(f'❌ {len(mismatches)} 日で不一致があります。CSVの日付や申告月の設定を確認してください。')
+                else:
+                    st.success(f'✅ 全 {len(comp_rows)} 日で人数が一致しました。日付計算は正確です。')
+
+                st.divider()
+
+                # ── 予約別 計算ステップ ──
+                st.subheader('② 予約別 計算ステップ明細')
+                st.caption(
+                    '**課税標準額/人** = 基本利用額 ÷ 人数 を千円未満切捨 　'
+                    '**宿泊税** = 課税標準額/人 × 2% × 人数（上限2,000円/人）'
+                )
+                if v_detail:
+                    df_v = pd.DataFrame(v_detail)
+                    # 数値列にカンマ書式
+                    for col in ['基本利用（円）', '1人当たり料金', '課税標準額/人（千円切捨）', '課税標準額合計', '宿泊税（円）']:
+                        df_v[col] = df_v[col].apply(lambda x: f'{x:,}')
+                    st.dataframe(df_v, use_container_width=True, hide_index=True)
+
+                    # 検証Excelダウンロード
+                    def _make_verify_excel(detail, comparison):
+                        wb = Workbook()
+                        # Sheet1: 予約別明細
+                        ws1 = wb.active
+                        ws1.title = '予約別計算明細'
+                        cols1 = list(detail[0].keys())
+                        for ci, h in enumerate(cols1, 1):
+                            c = ws1.cell(row=1, column=ci, value=h)
+                            c.font = Font(bold=True, size=9, name='MS Gothic')
+                            c.fill = PatternFill(fill_type='solid', fgColor='DDEEFF')
+                            c.border = thin_border()
+                            c.alignment = Alignment(horizontal='center', vertical='center')
+                        for ri, row in enumerate(detail, 2):
+                            for ci, key in enumerate(cols1, 1):
+                                c = ws1.cell(row=ri, column=ci, value=row[key])
+                                c.font = Font(size=9, name='MS Gothic')
+                                c.border = thin_border()
+                                c.alignment = Alignment(horizontal='center', vertical='center')
+                        for col in ws1.columns:
+                            ws1.column_dimensions[col[0].column_letter].width = 16
+                        # Sheet2: 日別照合
+                        ws2 = wb.create_sheet('日別照合')
+                        cols2 = list(comparison[0].keys())
+                        for ci, h in enumerate(cols2, 1):
+                            c = ws2.cell(row=1, column=ci, value=h)
+                            c.font = Font(bold=True, size=9, name='MS Gothic')
+                            c.fill = PatternFill(fill_type='solid', fgColor='DDEEFF')
+                            c.border = thin_border()
+                            c.alignment = Alignment(horizontal='center', vertical='center')
+                        for ri, row in enumerate(comparison, 2):
+                            for ci, key in enumerate(cols2, 1):
+                                c = ws2.cell(row=ri, column=ci, value=row[key])
+                                c.font = Font(size=9, name='MS Gothic')
+                                c.border = thin_border()
+                                c.alignment = Alignment(horizontal='center', vertical='center')
+                        for col in ws2.columns:
+                            ws2.column_dimensions[col[0].column_letter].width = 18
+                        buf = io.BytesIO()
+                        wb.save(buf)
+                        buf.seek(0)
+                        return buf
+
+                    vbuf = _make_verify_excel(v_detail, comp_rows)
+                    st.download_button(
+                        label='📥 検証Excelをダウンロード（予約別明細＋日別照合）',
+                        data=vbuf,
+                        file_name=f'宿泊税検証_{target_year}{target_month:02d}.xlsx',
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    )
+                else:
+                    st.info('対象月の予約データがありません。')
 
 # ── タブ3: 書類出力 ──
 with tab_export:
