@@ -7,6 +7,7 @@ import io
 import math
 import calendar
 import os
+import json
 from datetime import date, timedelta
 import re
 
@@ -18,6 +19,22 @@ MAX_TAX_PER_PERSON = 2000
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _DECLARATION_TPL = os.path.join(_BASE_DIR, '納入申告書テンプレ.xlsx')
 _NONYUSHO_TPL    = os.path.join(_BASE_DIR, '宿泊税納入書テンプレ.xlsx')
+_SETTINGS_FILE   = os.path.join(_BASE_DIR, 'settings.json')
+
+
+def load_settings():
+    if os.path.exists(_SETTINGS_FILE):
+        try:
+            with open(_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_settings(data: dict):
+    with open(_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def reiwa(year):
     return year - 2018
@@ -813,33 +830,61 @@ def _dl_card(num: str, title: str, desc: str, note: str, icon: str) -> str:
 st.markdown(_CSS + _HEADER_HTML, unsafe_allow_html=True)
 
 # ── サイドバー：施設・期間設定 ──
+_cfg = load_settings()
+
 with st.sidebar:
     st.header('⚙️ 施設・期間設定')
-    city_code = st.text_input('市町村コード', value='473260', help='北谷町：473260')
-    desig_no = st.text_input('指定番号', placeholder='例：001')
-    facility_name = st.text_input('宿泊施設名', placeholder='例：○○ホテル')
-    facility_address = st.text_input('施設所在地', placeholder='例：沖縄県中頭郡北谷町桑江1-1-1')
-    applicant_name = st.text_input('申告者名（法人名・代表者名）')
-    applicant_address = st.text_input('申告者住所')
+    city_code = st.text_input('市町村コード',
+                               value=_cfg.get('city_code', '473260'),
+                               help='北谷町：473260')
+    desig_no = st.text_input('指定番号',
+                              value=_cfg.get('desig_no', ''),
+                              placeholder='例：001')
+    facility_name = st.text_input('宿泊施設名',
+                                   value=_cfg.get('facility_name', ''),
+                                   placeholder='例：○○ホテル')
+    facility_address = st.text_input('施設所在地',
+                                      value=_cfg.get('facility_address', ''),
+                                      placeholder='例：沖縄県中頭郡北谷町桑江1-1-1')
+    applicant_name = st.text_input('申告者名（法人名・代表者名）',
+                                    value=_cfg.get('applicant_name', ''))
+    applicant_address = st.text_input('申告者住所',
+                                       value=_cfg.get('applicant_address', ''))
+
+    if st.button('💾 施設情報を保存', use_container_width=True):
+        save_settings({
+            'city_code':        city_code,
+            'desig_no':         desig_no,
+            'facility_name':    facility_name,
+            'facility_address': facility_address,
+            'applicant_name':   applicant_name,
+            'applicant_address':applicant_address,
+            'tax_inclusive':    False,
+            'meal_per_person':  0,
+        })
+        st.success('保存しました。次回起動時も自動入力されます。')
 
     st.divider()
     st.subheader('📅 申告対象年月')
     col_y, col_m = st.columns(2)
+    _today = date.today()
     with col_y:
-        target_year = st.number_input('年（西暦）', min_value=2025, max_value=2035, value=2026)
+        target_year = st.number_input('年（西暦）', min_value=2025, max_value=2035,
+                                       value=_cfg.get('last_year', _today.year))
     with col_m:
-        target_month = st.number_input('月', min_value=1, max_value=12, value=4)
+        target_month = st.number_input('月', min_value=1, max_value=12,
+                                        value=_cfg.get('last_month', _today.month))
 
     st.divider()
     st.subheader('💴 金額設定')
     tax_inclusive = st.checkbox(
         'CSVの金額は消費税込み（÷1.1で税抜換算）',
-        value=False,
+        value=_cfg.get('tax_inclusive', False),
         help='基本利用金額に消費税10%が含まれている場合はチェック'
     )
     meal_per_person = st.number_input(
         '食事代控除（1人1泊・円）',
-        min_value=0, value=0, step=100,
+        min_value=0, value=_cfg.get('meal_per_person', 0), step=100,
         help='食事付きプランがある場合、1人1泊あたりの食事代を入力（宿泊料金から一律控除）'
     )
 
@@ -933,6 +978,16 @@ with tab_calc:
             'total_tax': total_tax,
         }
         st.session_state['daily_data'] = daily_data
+
+        # 最後に使った年月を settings に保存（次回起動時のデフォルトにする）
+        if os.path.exists(_SETTINGS_FILE):
+            try:
+                _cur = load_settings()
+                _cur.update({'last_year': int(target_year), 'last_month': int(target_month),
+                             'tax_inclusive': tax_inclusive, 'meal_per_person': int(meal_per_person)})
+                save_settings(_cur)
+            except Exception:
+                pass
 
         # サマリー指標
         c1, c2, c3 = st.columns(3)
