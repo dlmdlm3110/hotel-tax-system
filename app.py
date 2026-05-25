@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 import io
 import math
 import calendar
+import os
 from datetime import date, timedelta
 import re
 
@@ -13,6 +14,10 @@ st.set_page_config(page_title="宿泊税計算システム", page_icon="🏨", l
 
 TAX_RATE = 0.02
 MAX_TAX_PER_PERSON = 2000
+
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_DECLARATION_TPL = os.path.join(_BASE_DIR, '納入申告書テンプレ.xlsx')
+_NONYUSHO_TPL    = os.path.join(_BASE_DIR, '宿泊税納入書テンプレ.xlsx')
 
 def reiwa(year):
     return year - 2018
@@ -641,6 +646,78 @@ def generate_nonyusho(facility_name, facility_address, desig_no, city_code,
     return buf
 
 
+def generate_declaration_from_template(facility_name, facility_address, desig_no,
+                                       applicant_name, applicant_address,
+                                       year, month,
+                                       taxable_guests, taxable_amount, tax_amount,
+                                       exempt_guests=0, exempt_amount=0):
+    """納入申告書テンプレ.xlsx を読み込み、データを書き込んで返す。"""
+    wb = load_workbook(_DECLARATION_TPL)
+    ws = wb.active
+    today = date.today()
+
+    def w(row, col, val):
+        ws.cell(row=row, column=col).value = val
+
+    # ヘッダー部
+    w(3, 7, desig_no or '')                                              # G3: 指定番号
+    w(5, 5, f'令和{reiwa(today.year)}年　{today.month}月　{today.day}日') # E5: 申告日
+    w(9, 2, applicant_address or '')                                     # B9: 申告者住所
+    w(9, 5, applicant_name or '')                                        # E9: 申告者氏名（E9:G11マージ）
+
+    # 施設情報
+    w(14, 4, facility_address or '')                                     # D14: 施設所在地
+    w(15, 4, facility_name or '')                                        # D15: 施設名称
+
+    # 第1ブロック（rows 19-21）
+    w(19, 1, f'令和{reiwa(year)}年')                                     # A19: 年（A19:A20マージ）
+    w(21, 1, f'{month}月分')                                             # A21: 月分
+    w(19, 3, f'{taxable_guests:,}人')                                    # C19: 課税対象 人数
+    w(19, 4, f'{taxable_amount:,}円')                                    # D19: 課税対象 宿泊料金（D19:E19マージ）
+    w(19, 7, f'{tax_amount:,}円')                                        # G19: 税額
+    if exempt_guests:
+        w(20, 3, f'{exempt_guests:,}人')                                 # C20: 免除 人数
+    if exempt_amount:
+        w(20, 4, f'{exempt_amount:,}円')                                 # D20: 免除 宿泊料金（D20:E20マージ）
+    w(21, 3, f'{taxable_guests + exempt_guests:,}人')                    # C21: 合計 人数
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def generate_nonyusho_from_template(facility_name, facility_address, desig_no, city_code,
+                                    applicant_name, applicant_address,
+                                    year, month, tax_amount):
+    """宿泊税納入書テンプレ.xlsx を読み込み、3面分のデータを書き込んで返す。"""
+    wb = load_workbook(_NONYUSHO_TPL)
+    ws = wb['第12号様式']
+
+    nm = month % 12 + 1
+    ny = year + (1 if month == 12 else 0)
+    due_str = f'令和{reiwa(ny)}年{nm}月{calendar.monthrange(ny, nm)[1]}日'
+    digits9 = [int(d) for d in str(max(0, int(tax_amount))).zfill(9)]
+    addr = facility_address or applicant_address or ''
+
+    # 3面: Panel1=col A(1), Panel2=col R(18), Panel3=col AI(35)
+    for s in (1, 18, 35):
+        ws.cell(row=10, column=s    ).value = f'令和{reiwa(year)}年度'  # 年度
+        ws.cell(row=10, column=s+2  ).value = f'{month}月'              # 申告年月
+        ws.cell(row=10, column=s+7  ).value = desig_no or ''            # 指定番号
+        for i, d in enumerate(digits9):
+            ws.cell(row=11, column=s+4+i).value = d                     # 税額（桁ごと）
+            ws.cell(row=14, column=s+4+i).value = d                     # 合計額（桁ごと）
+        ws.cell(row=15, column=s+4  ).value = due_str                   # 納期限
+        ws.cell(row=18, column=s    ).value = addr                      # 住所（所在地）
+        ws.cell(row=20, column=s    ).value = applicant_name or ''      # 氏名（名称）
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
 # ─────────── テーマ定数 ───────────
 _LOGO_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="64" height="64">
   <defs>
@@ -1052,20 +1129,21 @@ with tab_export:
                                  '北谷町税務課に提出する申告書',
                                  '提出期限：翌月末日（土日祝の場合は翌平日）', '📑'),
                         unsafe_allow_html=True)
-            decl_buf = generate_declaration(
+            _decl_kw = dict(
                 facility_name=facility_name or '（未入力）',
                 facility_address=facility_address or '',
                 desig_no=desig_no or '―',
                 applicant_name=applicant_name or '',
                 applicant_address=applicant_address or '',
-                year=target_year,
-                month=target_month,
+                year=target_year, month=target_month,
                 taxable_guests=calc['total_guests'],
                 taxable_amount=calc['total_base'],
                 tax_amount=calc['total_tax'],
-                exempt_guests=exempt_guests,
-                exempt_amount=exempt_amount,
+                exempt_guests=exempt_guests, exempt_amount=exempt_amount,
             )
+            decl_buf = (generate_declaration_from_template(**_decl_kw)
+                        if os.path.exists(_DECLARATION_TPL)
+                        else generate_declaration(**_decl_kw))
             st.download_button(
                 label='📥 申告書をダウンロード（Excel）',
                 data=decl_buf,
@@ -1079,17 +1157,19 @@ with tab_export:
                                  '金融機関での納付に使う3枚綴り',
                                  '納入書・通知書・領収証書の3面構成', '🏦'),
                         unsafe_allow_html=True)
-            nonyusho_buf = generate_nonyusho(
+            _nony_kw = dict(
                 facility_name=facility_name or '（未入力）',
                 facility_address=facility_address or '',
                 desig_no=desig_no or '―',
                 city_code=city_code or '473260',
                 applicant_name=applicant_name or '',
                 applicant_address=applicant_address or '',
-                year=target_year,
-                month=target_month,
+                year=target_year, month=target_month,
                 tax_amount=calc['total_tax'],
             )
+            nonyusho_buf = (generate_nonyusho_from_template(**_nony_kw)
+                            if os.path.exists(_NONYUSHO_TPL)
+                            else generate_nonyusho(**_nony_kw))
             st.download_button(
                 label='📥 納入書をダウンロード（Excel）',
                 data=nonyusho_buf,
