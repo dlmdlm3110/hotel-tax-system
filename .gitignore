@@ -11,3 +11,11 @@ __pycache__/
 # Streamlit secrets
 .streamlit/secrets.toml
 settings.json
+appicon.ico
+
+# スクリーンショット・画像素材
+*.png
+*.HEIC
+
+# HTML（カタログ・見積）
+*.html
