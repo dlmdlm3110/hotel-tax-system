@@ -11,6 +11,8 @@ import os
 import json
 from datetime import date, timedelta, datetime as _dt
 import re
+import sqlite3
+import bcrypt
 
 st.set_page_config(page_title="宿泊税スマート", page_icon="🏨", layout="wide")
 
@@ -1288,10 +1290,10 @@ _HEADER_HTML = f"""<div style="background:linear-gradient(135deg,#1B4F72 0%,#1A8
   <div style="flex-shrink:0">{_LOGO_HTML}</div>
   <div style="flex:1">
     <div style="color:white;font-size:26px;font-weight:700;letter-spacing:-.3px;line-height:1.1;margin-bottom:5px;">宿泊税スマート</div>
-    <div style="color:rgba(255,255,255,.78);font-size:13px;">北谷町宿泊税 &nbsp;｜&nbsp; 月計表・申告書・納入書 自動作成ツール</div>
+    <div style="color:rgba(255,255,255,.78);font-size:13px;">沖縄県宿泊税 &nbsp;｜&nbsp; 月計表・申告書・納入書 自動作成ツール</div>
   </div>
   <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
-    <span style="background:rgba(255,255,255,.18);color:white;padding:4px 14px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap;">🏝 北谷町対応</span>
+    <span style="background:rgba(255,255,255,.18);color:white;padding:4px 14px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap;">🏝 沖縄県対応</span>
     <span style="background:#F1C40F;color:#1B4F72;padding:4px 14px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap;">税率 町1.2% + 県0.8% = 2.0%</span>
   </div>
 </div>"""
@@ -1323,6 +1325,41 @@ def _dl_card(num: str, title: str, desc: str, note: str, icon: str) -> str:
     )
 
 
+# ─────────── 認証 ───────────
+def _do_login():
+    if st.session_state.get('authenticated'):
+        return
+    st.title('宿泊税スマート')
+    st.subheader('ログイン')
+    with st.form('login_form'):
+        _uid = st.text_input('施設ID')
+        _pwd = st.text_input('パスワード', type='password')
+        _submit = st.form_submit_button('ログイン')
+    st.caption('ログインすることで[利用規約](https://imacoco-net.com/terms.html)および[プライバシーポリシー](https://imacoco-net.com/privacy.html)に同意したものとみなします。')
+    if _submit:
+        _uid = _uid.strip()
+        _db_path = os.path.join(_BASE_DIR, 'users.db')
+        if os.path.exists(_db_path):
+            _conn = sqlite3.connect(_db_path)
+            _cur = _conn.cursor()
+            _cur.execute("SELECT name, password FROM users WHERE username=? AND active=1", (_uid,))
+            _row = _cur.fetchone()
+            _conn.close()
+            if _row:
+                if bcrypt.checkpw(_pwd.encode(), _row[1].encode()):
+                    st.session_state.authenticated = True
+                    st.session_state.auth_facility = _row[0]
+                    st.rerun()
+                else:
+                    st.error('パスワードが違います')
+            else:
+                st.error('施設IDが見つかりません')
+        else:
+            st.error('データベースが見つかりません')
+    st.stop()
+
+_do_login()
+
 # ─────────── UI ───────────
 st.markdown(_CSS + _HEADER_HTML, unsafe_allow_html=True)
 
@@ -1330,10 +1367,17 @@ st.markdown(_CSS + _HEADER_HTML, unsafe_allow_html=True)
 _cfg = load_settings()
 
 with st.sidebar:
+    _auth_fac = st.session_state.get('auth_facility', '')
+    if _auth_fac:
+        st.caption(f'ログイン中: {_auth_fac}')
+    if st.button('ログアウト'):
+        st.session_state.authenticated = False
+        st.session_state.auth_facility = ''
+        st.rerun()
     st.header('⚙️ 施設・期間設定')
     city_code = st.text_input('市町村コード',
                                value=_cfg.get('city_code', '473260'),
-                               help='北谷町：473260')
+                               help='例）北谷町：473260、今帰仁村：473481')
     desig_no = st.text_input('指定番号',
                               value=_cfg.get('desig_no', ''),
                               placeholder='例：001')
@@ -1342,7 +1386,7 @@ with st.sidebar:
                                    placeholder='例：○○ホテル')
     facility_address = st.text_input('施設所在地',
                                       value=_cfg.get('facility_address', ''),
-                                      placeholder='例：沖縄県中頭郡北谷町桑江1-1-1')
+                                      placeholder='例：沖縄県国頭郡今帰仁村字仲宗根206')
     applicant_name = st.text_input('申告者名（法人名・代表者名）',
                                     value=_cfg.get('applicant_name', ''))
     applicant_address = st.text_input('申告者住所',
@@ -1939,7 +1983,7 @@ with tab_export:
 
         with col_b:
             st.markdown(_dl_card('②', '宿泊税納入申告書',
-                                 '北谷町税務課に提出する申告書',
+                                 '各市町村税務課に提出する申告書',
                                  f'3ヶ月分を1枚にまとめて出力', '📑'),
                         unsafe_allow_html=True)
             _decl_months = [
@@ -2015,7 +2059,7 @@ with tab_export:
 <div style="background:white;border-radius:12px;padding:18px 24px;box-shadow:0 2px 8px rgba(27,79,114,.07);">
 <div style="font-weight:700;color:#1B4F72;margin-bottom:10px;font-size:14px;">📮 提出方法</div>
 <ul style="margin:0;padding-left:20px;color:#5D6D7E;font-size:13px;line-height:1.9;">
-<li>月計表（3シート）と申告書をセットで北谷町税務課へ提出</li>
+<li>月計表（3シート）と申告書をセットで各市町村税務課へ提出</li>
 <li>提出先：窓口持参 ／ 郵送 ／ eLTAX 利用可</li>
 <li>電子申告は eLTAX（PCdeskNext）から申告可能</li>
 </ul>
@@ -2054,7 +2098,7 @@ with tab_receipt:
         r_room_excl = r_room_rate - r_cons_tax  # 消費税抜き額（宿泊税の課税基準）
         _, _, r_tax = calc_tax(r_guests, r_room_excl)
         st.metric('宿泊税（自動計算）', f'¥{r_tax:,}',
-                  help='（税込料金 − 消費税）÷ 人数から北谷町税率で計算')
+                  help='（税込料金 − 消費税）÷ 人数から沖縄県宿泊税率で計算')
         r_issue_date = st.date_input('発行日', value=date.today(), key='r_issue_date')
 
     if facility_name:
