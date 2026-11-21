@@ -39,6 +39,10 @@ _RECEIPT_TPL_D    = os.path.join(_BASE_DIR, '領収書タイプD宿泊税（税�
 _MONTHLY_TPL      = os.path.join(_BASE_DIR, '宿泊税月計表テンプレ.xlsx')
 _SETTINGS_FILE    = os.path.join(_BASE_DIR, 'settings.json')
 
+_PREF_MONTHLY_TPL     = os.path.join(_BASE_DIR, '県_月計表.xlsx')
+_PREF_DECLARATION_TPL = os.path.join(_BASE_DIR, '県_納入申告書.xlsx')
+_PREF_NONYUSHO_TPL    = os.path.join(_BASE_DIR, '県_納入書.xlsx')
+
 
 def load_settings():
     if os.path.exists(_SETTINGS_FILE):
@@ -1141,6 +1145,149 @@ def generate_nonyusho_from_template(facility_name, facility_address, desig_no, c
     return buf
 
 
+def generate_pref_monthly_from_template(facility_name, desig_no, months_calc_list):
+    """県_月計表.xlsx を使い月ごとにシートを複製して返す（県様式）。"""
+    wb = load_workbook(_PREF_MONTHLY_TPL)
+    tpl_ws = wb.active
+    tpl_name = tpl_ws.title
+
+    for mc in months_calc_list:
+        year       = mc['year']
+        month      = mc['month']
+        daily_data = mc.get('daily_data', {})
+
+        new_ws       = wb.copy_worksheet(tpl_ws)
+        new_ws.title = f'令和{reiwa(year)}年{month}月'
+
+        new_ws['C2'] = desig_no or ''
+        new_ws['C3'] = facility_name or ''
+        new_ws['B5'] = f'令和{reiwa(year)}年'
+        new_ws['C5'] = f'{month}月分'
+        new_ws['D5'] = None
+
+        for day in range(1, 32):
+            row  = 9 + day   # row 10 = day 1
+            info = daily_data.get(day, {})
+            if info.get('guests'):
+                new_ws.cell(row=row, column=3).value = info['guests']
+            if info.get('base'):
+                new_ws.cell(row=row, column=4).value = info['base']
+
+    del wb[tpl_name]
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def generate_pref_declaration_from_template(facility_name, facility_address, desig_no,
+                                            applicant_name, applicant_address,
+                                            months_data):
+    """県_納入申告書.xlsx に値を書き込んで返す（県様式）。
+    months_data: list of dict (1〜3件)
+      各 dict: {year, month, taxable_guests, taxable_amount, tax_amount,
+                exempt_guests=0, exempt_amount=0}
+    """
+    wb = load_workbook(_PREF_DECLARATION_TPL)
+    ws = wb.active
+    today = date.today()
+
+    def w(row, col, val):
+        ws.cell(row=row, column=col).value = val
+
+    # AN = column 40
+    w(13,  1, f'令和{reiwa(today.year)}年　{today.month}月　{today.day}日')
+    w(12, 40, applicant_address or '')
+    w(15, 40, applicant_name or '')
+    w(23, 40, facility_name or '')
+    w(26, 40, facility_address or '')
+    w(32, 40, desig_no or '')
+
+    # 3ブロック: 行開始 35, 41, 47
+    for block_row, md in zip([35, 41, 47], months_data):
+        year           = md['year']
+        month          = md['month']
+        taxable_guests = md.get('taxable_guests', 0)
+        taxable_amount = md.get('taxable_amount', 0)
+        tax_amount     = md.get('tax_amount', 0)
+        exempt_guests  = md.get('exempt_guests', 0)
+        exempt_amount  = md.get('exempt_amount', 0)
+
+        # A35:AC35 merged → 年月ラベル
+        w(block_row,     1,  f'　実績　令和{reiwa(year)}年　{month}月分')
+        # 課税対象行 (block_row+2)
+        w(block_row + 2, 14, taxable_guests)   # N列
+        w(block_row + 2, 30, taxable_amount)   # AD列
+        w(block_row + 2, 64, tax_amount)       # BL列
+        # 課税免除対象行 (block_row+3)
+        if exempt_guests:
+            w(block_row + 3, 14, exempt_guests)
+        if exempt_amount:
+            w(block_row + 3, 30, exempt_amount)
+        # 合計行 (block_row+4)
+        w(block_row + 4, 14, taxable_guests + exempt_guests)
+        w(block_row + 4, 30, taxable_amount + exempt_amount)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def generate_pref_nonyusho_from_template(facility_name, facility_address, desig_no,
+                                         applicant_name, applicant_address,
+                                         months_data):
+    """県_納入書.xlsx に値を書き込んで返す（県様式）。
+    months_data: list of dict [{year, month, tax_amount}]（1〜3件）
+    """
+    wb = load_workbook(_PREF_NONYUSHO_TPL)
+    ws = wb.active
+
+    total_tax = sum(md.get('tax_amount', 0) for md in months_data)
+
+    def _digits8(amount):
+        s = str(max(0, int(amount))).zfill(8)
+        first = next((i for i, d in enumerate(s) if d != '0'), 7)
+        return ['' if i < first else int(d) for i, d in enumerate(s)]
+
+    # 3パネル (s=2=B, s=25=Y, s=48=AV) × 3セクション (rows=17,26,35)
+    for s in (2, 25, 48):
+        # 施設情報（住所・氏名・施設名）
+        ws.cell(row=9,  column=s + 7).value = facility_address or applicant_address or ''
+        ws.cell(row=12, column=s + 7).value = applicant_name or ''
+        ws.cell(row=15, column=s + 7).value = facility_name or ''
+
+        # 月ごとのデータ
+        section_rows = [17, 26, 35]
+        for sec_row, md in zip(section_rows, months_data):
+            year      = md['year']
+            month     = md['month']
+            tax_amt   = md.get('tax_amount', 0)
+            # 年月（sec_row+1 行目：B18/B27/B36 など）
+            ws.cell(row=sec_row + 1, column=s    ).value = f'令和{reiwa(year)}年'
+            ws.cell(row=sec_row + 1, column=s + 2).value = f'{month}月分'
+            # 税額桁（sec_row 行目のヘッダー列を上書き）
+            for i, d in enumerate(_digits8(tax_amt)):
+                ws.cell(row=sec_row, column=s + 5 + i * 2).value = d
+
+        # 合計額（row 44）
+        for i, d in enumerate(_digits8(total_tax)):
+            ws.cell(row=44, column=s + 5 + i * 2).value = d
+
+        # 納期限（months_data 最後の月の翌月末）
+        if months_data:
+            last = months_data[-1]
+            nm = last['month'] % 12 + 1
+            ny = last['year'] + (1 if last['month'] == 12 else 0)
+            due_str = f'令和{reiwa(ny)}年{nm}月{calendar.monthrange(ny, nm)[1]}日'
+            ws.cell(row=46, column=s + 5).value = due_str
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
 def generate_receipt(receipt_type, guest_name, room_no, guests,
                      stay_date, room_rate, consumption_tax,
                      issue_date, facility_name, facility_address):
@@ -1375,6 +1522,12 @@ with st.sidebar:
         st.session_state.auth_facility = ''
         st.rerun()
     st.header('⚙️ 施設・期間設定')
+    _form_type_opts = ['市町村様式（北谷町など）', '県様式（今帰仁村など）']
+    _form_type_saved = _cfg.get('form_type', '市町村様式（北谷町など）')
+    _form_type_idx = _form_type_opts.index(_form_type_saved) if _form_type_saved in _form_type_opts else 0
+    form_type = st.radio('申告様式', _form_type_opts, index=_form_type_idx,
+                         help='北谷町など市町村税：市町村様式 ／ 今帰仁村など県税のみ：県様式')
+    st.divider()
     city_code = st.text_input('市町村コード',
                                value=_cfg.get('city_code', '473260'),
                                help='例）北谷町：473260、今帰仁村：473481')
@@ -1394,6 +1547,7 @@ with st.sidebar:
 
     if st.button('💾 施設情報を保存', use_container_width=True):
         save_settings({
+            'form_type':        form_type,
             'city_code':        city_code,
             'desig_no':         desig_no,
             'facility_name':    facility_name,
@@ -1939,6 +2093,7 @@ with tab_export:
                 _sum_rows.append({'月': _lbl, '宿泊者数': '─', '課税標準額': '─', '宿泊税額': '─'})
         st.dataframe(pd.DataFrame(_sum_rows), use_container_width=True, hide_index=True)
 
+        _is_pref = (form_type == '県様式（今帰仁村など）')
         col_a, col_b, col_c = st.columns(3)
 
         with col_a:
@@ -1946,7 +2101,13 @@ with tab_export:
                                  '申告書に添付する月別日次計表',
                                  f'{len(_loaded)}ヶ月分を1ファイル・複数シートで出力', '📋'),
                         unsafe_allow_html=True)
-            if os.path.exists(_MONTHLY_TPL):
+            if _is_pref and os.path.exists(_PREF_MONTHLY_TPL):
+                _monthly_buf = generate_pref_monthly_from_template(
+                    facility_name=facility_name or '（未入力）',
+                    desig_no=desig_no or '―',
+                    months_calc_list=_loaded,
+                )
+            elif os.path.exists(_MONTHLY_TPL):
                 _monthly_buf = generate_monthly_from_template(
                     facility_name=facility_name or '（未入力）',
                     desig_no=desig_no or '―',
@@ -1983,7 +2144,7 @@ with tab_export:
 
         with col_b:
             st.markdown(_dl_card('②', '宿泊税納入申告書',
-                                 '各市町村税務課に提出する申告書',
+                                 '申告先に提出する申告書',
                                  f'3ヶ月分を1枚にまとめて出力', '📑'),
                         unsafe_allow_html=True)
             _decl_months = [
@@ -1997,7 +2158,16 @@ with tab_export:
                 }
                 for _mc in _loaded
             ]
-            if os.path.exists(_DECLARATION_TPL):
+            if _is_pref and os.path.exists(_PREF_DECLARATION_TPL):
+                _decl_buf = generate_pref_declaration_from_template(
+                    facility_name=facility_name or '（未入力）',
+                    facility_address=facility_address or '',
+                    desig_no=desig_no or '―',
+                    applicant_name=applicant_name or '',
+                    applicant_address=applicant_address or '',
+                    months_data=_decl_months,
+                )
+            elif os.path.exists(_DECLARATION_TPL):
                 _decl_buf = generate_declaration_from_template(
                     facility_name=facility_name or '（未入力）',
                     facility_address=facility_address or '',
@@ -2033,19 +2203,33 @@ with tab_export:
                                  '金融機関での納付に使う3枚綴り',
                                  f'3ヶ月合計税額：¥{_total_tax_3m:,}', '🏦'),
                         unsafe_allow_html=True)
-            _nony_kw = dict(
-                facility_name=facility_name or '（未入力）',
-                facility_address=facility_address or '',
-                desig_no=desig_no or '―',
-                city_code=city_code or '473260',
-                applicant_name=applicant_name or '',
-                applicant_address=applicant_address or '',
-                year=target_year, month=target_month,
-                tax_amount=_total_tax_3m,
-            )
-            _nonyusho_buf = (generate_nonyusho_from_template(**_nony_kw)
-                             if os.path.exists(_NONYUSHO_TPL)
-                             else generate_nonyusho(**_nony_kw))
+            if _is_pref and os.path.exists(_PREF_NONYUSHO_TPL):
+                _pref_months_data = [
+                    {'year': _mc['year'], 'month': _mc['month'], 'tax_amount': _mc['total_tax']}
+                    for _mc in _loaded
+                ]
+                _nonyusho_buf = generate_pref_nonyusho_from_template(
+                    facility_name=facility_name or '（未入力）',
+                    facility_address=facility_address or '',
+                    desig_no=desig_no or '―',
+                    applicant_name=applicant_name or '',
+                    applicant_address=applicant_address or '',
+                    months_data=_pref_months_data,
+                )
+            else:
+                _nony_kw = dict(
+                    facility_name=facility_name or '（未入力）',
+                    facility_address=facility_address or '',
+                    desig_no=desig_no or '―',
+                    city_code=city_code or '473260',
+                    applicant_name=applicant_name or '',
+                    applicant_address=applicant_address or '',
+                    year=target_year, month=target_month,
+                    tax_amount=_total_tax_3m,
+                )
+                _nonyusho_buf = (generate_nonyusho_from_template(**_nony_kw)
+                                 if os.path.exists(_NONYUSHO_TPL)
+                                 else generate_nonyusho(**_nony_kw))
             st.download_button(
                 label='📥 納入書をダウンロード（Excel）',
                 data=_nonyusho_buf,
