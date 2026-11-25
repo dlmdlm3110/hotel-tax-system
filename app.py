@@ -1547,21 +1547,6 @@ with st.sidebar:
     applicant_address = st.text_input('申告者住所',
                                        value=_cfg.get('applicant_address', ''))
 
-    if st.button('💾 施設情報を保存', use_container_width=True):
-        save_settings({
-            'form_type':         form_type,
-            'city_code':         city_code,
-            'desig_no':          desig_no,
-            'facility_name':     facility_name,
-            'facility_address':  facility_address,
-            'applicant_name':    applicant_name,
-            'applicant_address': applicant_address,
-            'tax_inclusive':     tax_inclusive,
-            'meal_per_person':   int(meal_per_person),
-            'airbnb_commission': float(airbnb_commission),
-        })
-        st.success('保存しました。次回起動時も自動入力されます。')
-
     st.divider()
     st.subheader('📅 申告対象年月')
     col_y, col_m = st.columns(2)
@@ -1594,6 +1579,21 @@ with st.sidebar:
              '標準15.5%（ホスト3%+ゲスト14%〜16%の平均）。Host Only Fee方式は15%。',
     )
     airbnb_commission = airbnb_commission_pct / 100.0
+
+    if st.button('💾 施設情報を保存', use_container_width=True):
+        save_settings({
+            'form_type':         form_type,
+            'city_code':         city_code,
+            'desig_no':          desig_no,
+            'facility_name':     facility_name,
+            'facility_address':  facility_address,
+            'applicant_name':    applicant_name,
+            'applicant_address': applicant_address,
+            'tax_inclusive':     tax_inclusive,
+            'meal_per_person':   int(meal_per_person),
+            'airbnb_commission': float(airbnb_commission),
+        })
+        st.success('保存しました。次回起動時も自動入力されます。')
 
     st.divider()
     st.subheader('🎓 課税免除（学校行事等）')
