@@ -20,7 +20,7 @@ TAX_RATE = 0.02
 MAX_TAX_PER_PERSON = 2000
 AGODA_COMMISSION             = 0.12   # Agoda通常手数料（Private Sale等）
 AGODA_COMMISSION_INTELLIGENCE = 0.09  # Agoda Intelligence チャネルの手数料
-AIRBNB_COMMISSION            = 0.155  # Airbnb手数料（EarningsはこれをCSV記載額から控除済み）
+AIRBNB_COMMISSION            = 0.155  # Airbnb手数料のデフォルト値（施設ごとにサイドバーで上書き可）
 
 
 def _agoda_commission(note: str) -> float:
@@ -216,7 +216,7 @@ def parse_hotel_total_csv(file_bytes, target_year, target_month):
     return result
 
 
-def parse_airbnb_csv(file_bytes, target_year, target_month):
+def parse_airbnb_csv(file_bytes, target_year, target_month, commission_rate=AIRBNB_COMMISSION):
     """Airbnb予約CSVを解析し、対象月の宿泊レコードを返す。
     1予約行を宿泊日ごとに展開し、Earnings÷泊数で1泊あたりの金額を算出する。
     Returns: list of {day, guests, amount}
@@ -276,7 +276,7 @@ def parse_airbnb_csv(file_bytes, target_year, target_month):
             total_earnings = int(float(earnings_str))
         except (ValueError, TypeError):
             continue
-        gross_total = round(total_earnings / (1 - AIRBNB_COMMISSION))
+        gross_total = round(total_earnings / (1 - commission_rate))
         per_night = gross_total // nights
 
         # 各宿泊日ごとにレコードを生成（対象月のみ）
@@ -306,7 +306,8 @@ def calc_tax(guests, amount, meal_per_person=0, tax_inclusive=False):
 
 
 def parse_airbnb_csv_for_verification(file_bytes, target_year, target_month,
-                                       meal_per_person=0, tax_inclusive=False):
+                                       meal_per_person=0, tax_inclusive=False,
+                                       commission_rate=AIRBNB_COMMISSION):
     """Airbnb CSVを検証用に解析し、予約別明細と月またぎ除外データを返す。
     Returns: (detail_rows, excluded_rows)
     """
@@ -365,7 +366,7 @@ def parse_airbnb_csv_for_verification(file_bytes, target_year, target_month,
             total_earnings = int(float(earnings_str))
         except (ValueError, TypeError):
             continue
-        gross_total = round(total_earnings / (1 - AIRBNB_COMMISSION))
+        gross_total = round(total_earnings / (1 - commission_rate))
         per_night   = gross_total // nights
 
         for n in range(nights):
@@ -374,6 +375,7 @@ def parse_airbnb_csv_for_verification(file_bytes, target_year, target_month,
                 base_pp, _, tax = calc_tax(guests, per_night,
                                            meal_per_person=meal_per_person,
                                            tax_inclusive=tax_inclusive)
+                _gross_col = f'グロスアップ後（手数料{commission_rate*100:.1f}%補正）'
                 detail_rows.append({
                     '予約コード':                conf_code,
                     '宿泊日':                   night_date.strftime('%m/%d'),
@@ -381,7 +383,7 @@ def parse_airbnb_csv_for_verification(file_bytes, target_year, target_month,
                     'チェックアウト':            checkout.strftime('%m/%d'),
                     '人数（人）':                guests,
                     'Earnings（CSV記載額）':     total_earnings,
-                    'グロスアップ後（÷0.845）': gross_total,
+                    _gross_col:                 gross_total,
                     '1泊料金（円）':             per_night,
                     '課税標準額/人（千円切捨）': base_pp,
                     '宿泊税（円）':              tax,
@@ -1547,15 +1549,16 @@ with st.sidebar:
 
     if st.button('💾 施設情報を保存', use_container_width=True):
         save_settings({
-            'form_type':        form_type,
-            'city_code':        city_code,
-            'desig_no':         desig_no,
-            'facility_name':    facility_name,
-            'facility_address': facility_address,
-            'applicant_name':   applicant_name,
-            'applicant_address':applicant_address,
-            'tax_inclusive':    tax_inclusive,
-            'meal_per_person':  int(meal_per_person),
+            'form_type':         form_type,
+            'city_code':         city_code,
+            'desig_no':          desig_no,
+            'facility_name':     facility_name,
+            'facility_address':  facility_address,
+            'applicant_name':    applicant_name,
+            'applicant_address': applicant_address,
+            'tax_inclusive':     tax_inclusive,
+            'meal_per_person':   int(meal_per_person),
+            'airbnb_commission': float(airbnb_commission),
         })
         st.success('保存しました。次回起動時も自動入力されます。')
 
@@ -1582,6 +1585,15 @@ with st.sidebar:
         min_value=0, value=int(_cfg.get('meal_per_person', 0)), step=100,
         help='1泊1人あたりの食事代。課税標準額から控除されます。不要なら0のまま。',
     )
+    airbnb_commission_pct = st.number_input(
+        'Airbnb手数料率（%）',
+        min_value=0.0, max_value=30.0,
+        value=float(_cfg.get('airbnb_commission', AIRBNB_COMMISSION) * 100),
+        step=0.1, format='%.1f',
+        help='AirbnbのEarningsは手数料控除後の金額。この率でグロスアップして素泊まり料金を算出します。'
+             '標準15.5%（ホスト3%+ゲスト14%〜16%の平均）。Host Only Fee方式は15%。',
+    )
+    airbnb_commission = airbnb_commission_pct / 100.0
 
     st.divider()
     st.subheader('🎓 課税免除（学校行事等）')
@@ -1634,7 +1646,7 @@ with tab_upload:
                     _raw = _uf.read()
                     _fmt = detect_csv_format(_raw)
                     if _fmt == 'airbnb':
-                        _all_items  += parse_airbnb_csv(_raw, y, m)
+                        _all_items  += parse_airbnb_csv(_raw, y, m, commission_rate=airbnb_commission)
                         _has_airbnb = True
                         if _airbnb_raw_csv is None:
                             _airbnb_raw_csv = _raw
@@ -1862,6 +1874,7 @@ with tab_calc:
                         int(target_year), int(target_month),
                         meal_per_person=int(meal_per_person),
                         tax_inclusive=tax_inclusive,
+                        commission_rate=airbnb_commission,
                     )
                     st.subheader(f'{prefix}Airbnb 予約別 計算ステップ明細')
                     st.caption(
